@@ -1,0 +1,128 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prepare test directories
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force Reports, Output, Output/FortniteImports | Out-Null
+
+      - name: Run source checks
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -t . -p 'test_*.py'
+          python -m compileall -q studio_core Tools studio.py blender_worker.py m2_worker.py hd_batch_worker.py run_hd_batch.py
+          python Tools/check_release.py
+
+      - name: Install PyInstaller
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+
+      - name: Adjust frozen application path
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          path = Path("studio.py")
+          text = path.read_text(encoding="utf-8")
+
+          if "import sys\nfrom pathlib import Path" not in text:
+              text = text.replace(
+                  "import os\nfrom pathlib import Path",
+                  "import os\nimport sys\nfrom pathlib import Path",
+                  1,
+              )
+
+          text = text.replace(
+              "ROOT = Path(__file__).resolve().parent",
+              "ROOT = (Path(sys.executable).resolve().parent "
+              "if getattr(sys, 'frozen', False) "
+              "else Path(__file__).resolve().parent)",
+              1,
+          )
+
+          path.write_text(text, encoding="utf-8")
+          '@ | python -
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --windowed `
+            --name WoW-Dance-Studio `
+            --paths . `
+            studio.py
+
+      - name: Copy application runtime files
+        shell: pwsh
+        run: |
+          $dist = "dist\WoW-Dance-Studio"
+
+          Copy-Item -Path "Studio*.ps1" -Destination $dist -Force
+
+          $files = @(
+            "Setup.cmd",
+            "Setup.ps1",
+            "Launch Studio.cmd",
+            "studio.py",
+            "blender_worker.py",
+            "m2_worker.py",
+            "hd_batch_worker.py",
+            "run_hd_batch.py",
+            "check_setup.py",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          )
+
+          foreach ($file in $files) {
+            if (Test-Path -LiteralPath $file) {
+              Copy-Item -LiteralPath $file -Destination $dist -Force
+            }
+          }
+
+          $directories = @(
+            "studio_core",
+            "Tools",
+            "Addon",
+            "Profiles",
+            "docs"
+          )
+
+          foreach ($directory in $directories) {
+            if (Test-Path -LiteralPath $directory) {
+              Copy-Item `
+                -LiteralPath $directory `
+                -Destination $dist `
+                -Recurse `
+                -Force
+            }
+          }
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: WoW-Dance-Studio-Windows
+          path: dist/WoW-Dance-Studio
+          retention-days: 14
